@@ -1,5 +1,5 @@
 // Offline cache: serve from cache instantly, refresh in the background.
-const CACHE = 'fridgey-v1';
+const CACHE = 'fridgey-v2';
 const CORE = ['./', 'index.html', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
 
 self.addEventListener('install', e => {

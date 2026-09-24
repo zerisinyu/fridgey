@@ -358,11 +358,29 @@ function normalize(s) {
   if (!s || !Array.isArray(s.items) || !Array.isArray(s.locations)) throw new Error('bad data');
   s.categories ||= DEFAULT_CATS.map(c => ({ ...c }));
   s.shopping ||= []; s.history ||= {}; s.ui ||= { loc: s.locations[0]?.id, lastCat: {} }; s.ui.lastCat ||= {};
+  // fill in anything an older (or newer) version didn't write, so one odd item can't break the app
+  s.items = s.items.filter(i => i && typeof i === 'object').map(i => ({
+    expiry: null, opened: false, openedAt: null, useSoon: false, note: '', emoji: '', addedAt: 0, ...i,
+    id: i.id || uid(), name: String(i.name ?? '?'), locationId: i.locationId || s.locations[0]?.id,
+    qty: { mode: 'level', count: 1, unit: '', level: 4, ...(i.qty || {}) },
+  }));
   return s;
 }
-let state;
-try { state = normalize(JSON.parse(localStorage.getItem(KEY))); } catch { state = seed(); }
-function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) { toast('⚠️ Could not save: storage full?'); } }
+let state, rescuedKey = null;
+const RESCUE = 'pantry.rescue.';
+{
+  let raw = null;
+  try { raw = localStorage.getItem(KEY); } catch {}
+  if (!raw) state = seed();
+  else try { state = normalize(JSON.parse(raw)); }
+  catch {
+    // never overwrite data we couldn't read: park it under its own key first
+    rescuedKey = RESCUE + Date.now();
+    try { localStorage.setItem(rescuedKey, raw); state = { ...seed(), items: [], history: {} }; }
+    catch { state = null; }
+  }
+}
+function save() { if (!state) return; try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) { toast('⚠️ Could not save: storage full?'); } }
 save();
 if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
 
@@ -374,11 +392,11 @@ function restore(s) { const ui = state.ui; state = normalize({ ...JSON.parse(s),
 
 /* ---------- toast ---------- */
 let toastTimer;
-function toast(msg, actions = []) {
+function toast(msg, actions = [], ms) {
   const el = $('#toast');
   el.innerHTML = `<span class="msg">${esc(msg)}</span>` + actions.map((a, i) => `<button data-i="${i}" class="${a.pri ? 'pri' : ''}">${esc(a.label)}</button>`).join('');
   el.onclick = e => { const b = e.target.closest('button'); if (!b) return; actions[b.dataset.i].run(); hideToast(); };
-  el.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(hideToast, actions.length ? 5000 : 2200);
+  el.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(hideToast, ms || (actions.length ? 5000 : 2200));
 }
 function hideToast() { $('#toast').classList.remove('show'); }
 
@@ -725,7 +743,7 @@ function openForm({ id, prefillName, shopId, chain } = {}) {
       ? `<div class="qty-ed"><div class="step"><button data-q="-1" aria-label="Less">−</button><output>${f.qty.count}</output><button data-q="1" aria-label="More">+</button></div><input class="unit" id="fUnit" placeholder="unit" value="${esc(f.qty.unit)}" autocomplete="off"></div>`
       : `<div class="levels">${[1,2,3,4].map(n => `<button class="${f.qty.level === n ? 'on' : ''}" data-lv="${n}">${lvBars(n)}${LEVELS[n]}</button>`).join('')}</div>`;
     const t = today(), d = daysLeft(f.expiry);
-    const quick = [['3 days', 3], ['1 week', 7], ['2 weeks', 14], ['1 month', 30], ['3 months', 91], ['1 year', 365]];
+    const quick = [['1 day', 1], ['2 days', 2], ['3 days', 3], ['1 week', 7], ['2 weeks', 14], ['1 month', 30], ['3 months', 91], ['1 year', 365]];
     $('#fExp', B).innerHTML = `<button class="chip ${f.expiry === null ? 'on' : ''}" data-exp="none">🤷 Unknown</button>` +
       quick.map(([l, n]) => `<button class="chip ${f.expiry === addDays(t, n) ? 'on' : ''}" data-exp="${n}">${l}</button>`).join('') +
       `<label class="chip ${f.expiry && !quick.some(([, n]) => f.expiry === addDays(t, n)) ? 'on' : ''}">📅 ${f.expiry && !quick.some(([, n]) => f.expiry === addDays(t, n)) ? shortDate(f.expiry) : 'Pick date'}<input type="date" id="fDate" value="${f.expiry || ''}"></label>`;
@@ -855,6 +873,7 @@ function openSettings() {
       <div class="lbl">Backup</div>
       <p class="muted" style="margin-top:0">Everything lives only on this device. Export now and then so you never lose it.</p>
       <div class="stack"><button class="btn ghost" data-s="export">⬇️ Export backup (.json)</button><button class="btn ghost" data-s="import">⬆️ Import backup</button><button class="btn ghost" data-s="copy">📋 Copy list as text</button></div>
+      ${rescueKeys().length ? `<div class="lbl">Rescued data</div><p class="muted" style="margin-top:0">An older copy couldn’t be opened and was kept safe. Download it and send it over to get it fixed.</p><div class="stack">${rescueKeys().map(k => `<button class="btn ghost" data-rescue="${k}">🛟 Download copy from ${new Date(+k.slice(RESCUE.length)).toLocaleString()}</button>`).join('')}</div>` : ''}
       <div class="lbl">Start over</div>
       <div class="stack"><button class="btn danger" data-s="wipe">Erase everything</button></div>
       <p class="muted" style="text-align:center;margin-top:18px">Fridgey · made with 🥬</p>`;
@@ -874,6 +893,7 @@ function openSettings() {
       if (b.hasAttribute('data-rm')) arr.splice(i, 1);
       save(); renderAll(); return paintS();
     }
+    if (b.dataset.rescue) return downloadRescue(b.dataset.rescue);
     const a = b.dataset.s;
     if (a === 'addloc') { state.locations.push({ id: uid(), emoji: '📦', name: 'New place' }); save(); renderAll(); paintS(); $$('.set-row[data-kind="loc"] .t', sh.body).pop().select(); }
     if (a === 'addcat') { state.categories.push({ id: uid(), emoji: '🍽️', name: 'New type' }); save(); renderAll(); paintS(); $$('.set-row[data-kind="cat"] .t', sh.body).pop().select(); }
@@ -885,6 +905,11 @@ function openSettings() {
   sh.foot.onclick = () => closeSheet();
 }
 $('#btnSettings').onclick = openSettings;
+function rescueKeys() { try { return Object.keys(localStorage).filter(k => k.startsWith(RESCUE)).sort(); } catch { return []; } }
+function downloadRescue(k) {
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([localStorage.getItem(k) || ''], { type: 'application/json' }));
+  a.download = `fridgey-rescued-${k.slice(RESCUE.length)}.json`; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
 async function exportData() {
   const name = `fridgey-${today()}.json`, json = JSON.stringify(state, null, 1);
   const file = new File([json], name, { type: 'application/json' });
@@ -916,7 +941,12 @@ async function copyText() {
 }
 
 /* ---------- boot ---------- */
+if (!state) {
+  document.body.innerHTML = '<div class="empty" style="padding-top:30vh"><div class="big">🛟</div>Fridgey couldn’t read its saved data, and there was no room to back it up.<br>Nothing was changed. Please don’t clear this site’s data; ask for a fix first.</div>';
+  throw new Error('unreadable data left untouched');
+}
 renderAll();
+if (rescuedKey) toast('🛟 Old data couldn’t be read. It’s kept safe in Settings', [{ label: 'Save it', pri: true, run: () => downloadRescue(rescuedKey) }], 15000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) renderAll(); }); // refresh day counts when reopened
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});
 </script>
